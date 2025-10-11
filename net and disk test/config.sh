@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# config.sh — shared parameters for disk_test.sh & sleep_test.sh
+# config.sh ??shared parameters for disk_test.sh & sleep_test.sh
 # - Defines timestamps, persistent counters, disk log defaults
 # - Records _SESSION_T0 for elapsed fallback
 # - Manages _bLoops prompt unless DISABLE_LOOPS_PROMPT=1
@@ -8,26 +8,28 @@
 #     _sleep_wake_after_sec   (default 60s)
 set -Eeuo pipefail
 
+# ---------- config API version ----------
 export _config_api_version
 : "${_config_api_version:="00.00.01"}"
 
+# ---------- Timestamp format ----------
+: "${_human_timestamp_format:=%Y-%m-%d %H-%M-%S}"
+: "${_log_timestamp_format:=%Y%m%d%H%M%S}"
+export _human_timestamp_format _log_timestamp_format
+
 setup_session() {
+  log_dir "" 1 || return 1   # 1 = ?? session 摮??冗
+  : "${_pwd:="adlink"}"
   # Session start (for elapsed fallback)
   #export _SESSION_T0="$(date +%s)"
   export _session_t0="$(date +%s)"      # some tests use ${_session_t0} for elapsed time
 
-  # Timestamps
-  export _date_format1="$(date '+%Y-%m-%d_%H-%M-%S')"
-
-  export _date_format2="$(date '+%Y%m%d%H%M%S')"
-  #export date2="${_date2}"   # some tests use ${date2} in filenames
-
-  # Ensure log path (function.sh/log_folder normally sets this)
-  #: "${_log_folder:=${PWD}/logs}"
-  #mkdir -p "${_log_folder}"
+  # Ensure log path (function.sh/log_dir normally sets this)
+  #: "${_log_dir:=${PWD}/logs}"
+  #mkdir -p "${_log_dir}"
 
   # Persistent counter for sleep test iteration filenames
-  export _count_file="${_log_folder}/counter.log"
+  export _count_file="${_log_dir}/counter.log"
   if [[ -f "${_count_file}" ]]; then
     local _last
     : "${_last:="$(tail -n1 "${_count_file}" 2>/dev/null | tr -dc '0-9')"}"
@@ -43,8 +45,8 @@ setup_session() {
   fi
 
   # Disk test defaults
-  export _disklog="${_disklog:-disk_test_${_date_format2}.log}"
-  : "${YES_I_UNDERSTAND:=0}" ; export YES_I_UNDERSTAND
+#  export _disklog="${_disklog:-disk_test_${_date_format2}.log}"
+#  : "${YES_I_UNDERSTAND:=0}" ; export YES_I_UNDERSTAND
 
   # Sleep timing defaults (can be overridden by environment before calling setup_session)
   : "${_sleep_delay_after_boot:=40}"

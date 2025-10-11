@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# net_test.sh — IPv4/IPv6 connectivity + throughput with consolidated logs & summary (v2)
+# net_test.sh ??IPv4/IPv6 connectivity + throughput with consolidated logs & summary (v2)
 # Improvements:
 # 1) After changing speed, also configure odd-side NIC; try autoneg off + duplex full; add settle sleep
 # 2) Add a blank line between IPv4 and IPv6 blocks in net_test_*.log
@@ -10,14 +10,51 @@ set -Eeuo pipefail
 export _net_test_version
 : "${_net_test_version:="00.00.01"}"
 
-echo "[DEBUG] running enhanced net_test.sh v2"
+echo "[INFO] running net_test.sh v${_net_test_version}."
 
-_user=adlink
-_pwd=adlink
+# ---------- Locate & source companions (REQUIRED) ----------
+_entry="$(readlink -f "${BASH_SOURCE[0]:-$0}")"     # The script with full path, e.g. /home/adlink/Downloads/test.sh.
+_entry_dir="$(cd "$(dirname "${_entry}")" && pwd)"      # The directory of the script, e.g. /home/adlink/Downloads.
 
-# Load config/session + shared funcs
-. /home/${_user}/Downloads/config.sh
-. ./function.sh
+find_and_source() {
+  local _name="$1"
+  local search_dirs=(     # Directories to search for the companion scripts
+    "${_entry_dir}"
+    "/home/${USER}/Downloads"
+  )
+
+  for _dir in "${search_dirs[@]}"; do
+    if [[ -f "${_dir}/${_name}" ]]; then
+      . "${_dir}/${_name}"
+      return 0
+    fi
+  done
+
+  echo "FATAL: cannot find ${_name} in any of the search directories." >&2
+  printf " - %s\n" "${search_dirs[@]}" >&2
+  exit 1
+}
+
+find_and_source "config.sh"
+find_and_source "function.sh"
+# ---------- Parse CLI parameters ----------
+parse_common_cli "$@"
+
+# If have the loops argument, parse it now to set _bLoops.
+if [[ -n "${_cli_loops:-}" ]]; then
+  parse_loops_arg "${_cli_loops}"
+fi
+
+# Rebuild REM_ARGS to exclude loops argument (already parsed)
+# Ex.
+# ./net_test.sh (default: auto, 1 loop)
+# ./net_test.sh 10 sticky
+# ./net_test.sh --sticky -n 
+# ./net_test.sh --session-id=batch_20251009
+set -- "${REM_ARGS[@]}"
+
+# If your loops is in "_bLoops", it is already set by parse_loops_arg above.
+counter_init "net" "${_bLoops:-1}"
 
 # Always cleanup on exit (success or failure)
 trap 'iperf3_del; netns_del' EXIT
@@ -28,22 +65,30 @@ prepare_net_tools
 # Ensure tools and logs
 ethtool_install
 iperf3_install
-log_folder
+#log_root="$(log_dir "" 1 | tail -n1)"
+  log_dir "" 1
+  log_root="${_session_log_dir}"
 setup_session
 
 # Start elapsed timer now (fix 00:00:00 issue)
 run_time
 
 # Define consolidated logs
-export _netlog="net_test_${_date_format2}.log"
-_netsum="net_summary_${_date_format2}.log"
-: > "${_netlog}"
-{
-  echo "============= Network Test (${_date_format2}) ============="
-  echo "Host: $(hostname)   User: ${_user}"
+: "${_session_ts:=$(now_ts)}"
+_run_ts="${_session_ts}"
+#_netlog="${log_root}/net_test_${_run_ts}.log"
+#_netsum="${log_root}/net_summary_${_run_ts}.log"
+  _netlog="${_session_log_dir}/net_test_${_run_ts}.log"
+  _netsum="${_session_log_dir}/net_summary_${_run_ts}.log"
+
+if [[ ! -f "${_netlog}" ]]; then
+  {
+  echo "============= Network Test (${_run_ts}) ============="
+  echo "Host: $(hostname)   User: $(whoami)"
   echo "API: ${_function_api_version}   FeatureFlag: ${FEATURE_USE_NEW_NET_TOOLING:-0}"
   echo "===================================================="
-} >> "${_netlog}"
+} > "${_netlog}"
+fi
 
 : > "${_netsum}"
 {
@@ -70,9 +115,13 @@ _ping_check() {
   local tmpf
   tmpf="$(mktemp)"
   if [[ "$v6" == "1" ]]; then
-    echo "${_pwd}" | sudo -S ip netns exec "${ns}" ping6 -6 -c 4 "${addr}" | tee "${tmpf}" >> "${_netlog}"
+    echo "${_pwd}" | sudo -S ip netns exec "${ns}" ping6 -6 -c 4 "${addr}" \
+      | tee "${tmpf}" \
+      | tee -a "${_netlog}" > /dev/null
   else
-    echo "${_pwd}" | sudo -S ip netns exec "${ns}" ping -c 4 "${addr}" | tee "${tmpf}" >> "${_netlog}"
+    echo "${_pwd}" | sudo -S ip netns exec "${ns}" ping -c 4 "${addr}" \
+      | tee "${tmpf}" \
+      | tee -a "${_netlog}" > /dev/null
   fi
   if grep -q " 0% packet loss" "${tmpf}"; then
     echo "PASS"
@@ -100,12 +149,18 @@ _set_speed() {
   fi
 }
 
-parse_loops_arg "${1:-}"
+if [[ -n "${1:-}" ]]; then
+  parse_loops_arg "${1:-}"
+fi
 
 # Main per-pair loop
 for (( loop_n=1; loop_n<=_bLoops; loop_n++ )); do
   echo "------------------------------------------------------------"
   echo "[$loop_n/$_bLoops] Network test..."
+  #echo "[$(counter_next_tag)] Network test..."
+  _km="$(counter_next_tag)"    # e.g. "3/10"
+  _k="${_km%%/*}"               # "3"
+  _mm="${_km##*/}"              # "10"
   for ((i=0; i<${#even_ethArray[@]}; i++)); do
     ev="${even_ethArray[i]}"; od="${odd_ethArray[i]}"
     pair="${ev}<->${od}"
@@ -124,6 +179,10 @@ for (( loop_n=1; loop_n<=_bLoops; loop_n++ )); do
       _set_speed "ns_${od}" "${od}" "${_netspd}"
       sleep 4
 
+      # Loop 
+      echo "----- Iteration ${_k} of ${_mm} -----" | tee -a "${_netlog}"
+      echo "Start time: $(date '+%Y-%m-%d %H:%M:%S')" | tee -a "${_netlog}"
+
       # IPv4 ping (even -> odd)
       echo "[IPv4 ICMP] ${ev} -> 192.247.${i}.11" | tee -a "${_netlog}"
       v4_res=$(_ping_check "ns_${ev}" "192.247.${i}.11" "0")
@@ -140,10 +199,10 @@ for (( loop_n=1; loop_n<=_bLoops; loop_n++ )); do
       sleep 1
 
       # Log filenames
-      tcp_fwd="iPerf3_${ev}_n_${od}_TCP_${_date_format2}.log"
-      tcp_rev="iPerf3_${ev}_n_${od}_TCPReverse_${_date_format2}.log"
-      udp_fwd="iPerf3_${ev}_n_${od}_UDP_${_date_format2}.log"
-      udp_rev="iPerf3_${ev}_n_${od}_UDPReverse_${_date_format2}.log"
+      tcp_fwd="${log_root}/iPerf3_${ev}_n_${od}_TCP_${_k}_of_${_mm}_${_run_ts}.log"
+      tcp_rev="${log_root}/iPerf3_${ev}_n_${od}_TCPReverse_${_k}_of_${_mm}_${_run_ts}.log"
+      udp_fwd="${log_root}/iPerf3_${ev}_n_${od}_UDP_${_k}_of_${_mm}_${_run_ts}.log"
+      udp_rev="${log_root}/iPerf3_${ev}_n_${od}_UDPReverse_${_k}_of_${_mm}_${_run_ts}.log"
 
       # TCP reverse (receiver = even side)
       echo "[TCP Reverse] ${ev} <- ${od} @ ${_netspd} Mbps" | tee -a "${_netlog}"
@@ -181,8 +240,9 @@ for (( loop_n=1; loop_n<=_bLoops; loop_n++ )); do
         "${rate_tcp_fwd}" "${rate_tcp_rev}" "${rate_udp_fwd}" "${rate_udp_rev}" >> "${_netsum}"
     done
   done
+  counter_tick
 done
 
 # Done
 elp_time | tee -a "${_netlog}"
-cd "${_toolPath}"
+cd "${_tool_path}"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# disk_test.sh — depends on config.sh & function.sh, with robust logging and fixed summary
+# disk_test.sh ??depends on config.sh & function.sh, with robust logging and fixed summary
 
 #set -uo pipefail  # no `-e` to avoid early aborts
 set -Eeuo pipefail
@@ -8,25 +8,46 @@ export _disk_test_version
 : "${_disk_test_version:="00.00.01"}"
 
 # ---------- Locate & source companions (REQUIRED) ----------
-_entry="$(readlink -f "${BASH_SOURCE[0]:-$0}")"
-_entry_dir="$(cd "$(dirname "$_entry")" && pwd)"
+_entry="$(readlink -f "${BASH_SOURCE[0]:-$0}")"     # The script with full path, e.g. /home/adlink/Downloads/test.sh.
+_entry_dir="$(cd "$(dirname "${_entry}")" && pwd)"      # The directory of the script, e.g. /home/adlink/Downloads.
 
 find_and_source() {
-  local name="$1"
-  if [[ -f "${_entry_dir}/${name}" ]]; then . "${_entry_dir}/${name}"; return 0; fi
-  if [[ -f "/home/${USER}/Downloads/${name}" ]]; then . "/home/${USER}/Downloads/${name}"; return 0; fi
-  echo "FATAL: cannot find ${name}. Please place it next to disk_test.sh or in ~/Downloads." >&2
+  local _name="$1"
+  local search_dirs=(     # Directories to search for the companion scripts
+    "${_entry_dir}"
+    "/home/${USER}/Downloads"
+  )
+
+  for _dir in "${search_dirs[@]}"; do
+    if [[ -f "${_dir}/${_name}" ]]; then
+      . "${_dir}/${_name}"
+      return 0
+    fi
+  done
+
+  echo "FATAL: cannot find ${_name} in any of the search directories." >&2
+  printf " - %s\n" "${search_dirs[@]}" >&2
   exit 1
 }
 
-find_and_source "function.sh"
 find_and_source "config.sh"
+find_and_source "function.sh"
 
 parse_loops_arg "${1:-}"
 
 # ---------- Init logs & session ----------
-log_folder   || true   # from function.sh
-setup_session || true  # from config.sh
+log_root="$(log_dir "" 1)" || true
+setup_session || true
+
+# 蝯曹??函?撠楝敺?log() { echo "[$(date '+%F %T')] $*" | tee -a "${log_root}/${_disklog}"; }
+
+# run_fio 銋?葆?韌
+run_fio(){ local dev="$1" out="$2"; shift 2;
+  sudo fio --filename="$dev" --group_reporting --name=test \
+    --output="${log_root}/${out}" --direct=1 "$@"
+}
+
+summary_file="${log_root}/disk_summary_${_date_format2}.log"
 
 : "${_date_format2:?Missing. Please set _date_format2 in config.sh (setup_session).}"
 : "${_bLoops:?Missing. Please set _bLoops in config.sh (e.g., _bLoops=10).}"
@@ -201,3 +222,5 @@ run_time || true
 echo "" | tee -a "${_disklog}"
 elp_time | tee -a "${_disklog}"
 log "Summary written to: ${summary_file}"
+
+
