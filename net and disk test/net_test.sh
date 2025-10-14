@@ -40,10 +40,11 @@ find_and_source "function.sh"
 # ---------- Parse CLI parameters ----------
 parse_common_cli "$@"
 
-# If have the loops argument, parse it now to set _bLoops.
-if [[ -n "${_cli_loops:-}" ]]; then
-  parse_loops_arg "${_cli_loops}"
-fi
+# If have the loops argument, parse it now to set _target_loops.
+#if [[ -n "${_cli_loops:-}" ]]; then
+#  parse_loops_arg "${_cli_loops}"
+#  _target_loops="${_cli_loops:-1}"
+#fi
 
 # Rebuild REM_ARGS to exclude loops argument (already parsed)
 # Ex.
@@ -53,8 +54,8 @@ fi
 # ./net_test.sh --session-id=batch_20251009
 set -- "${REM_ARGS[@]}"
 
-# If your loops is in "_bLoops", it is already set by parse_loops_arg above.
-counter_init "net" "${_bLoops:-1}"
+# If your loops is in "_target_loops", it is already set by parse_loops_arg above.
+#counter_init "net" "${_target_loops:-1}"
 
 # Always cleanup on exit (success or failure)
 trap 'iperf3_del; netns_del' EXIT
@@ -65,21 +66,35 @@ prepare_net_tools
 # Ensure tools and logs
 ethtool_install
 iperf3_install
-#log_root="$(log_dir "" 1 | tail -n1)"
-  log_dir "" 1
-  log_root="${_session_log_dir}"
+
+# ---------- Log folder ----------
+log_dir "" 1
+log_root="${_session_log_dir}"
+
+# Initialize, m = _target_loop
+counter_init "net" "${_target_loop:-1}"
+
+# Calculate how many loops to do
+_loops_this_run=$(counter_loops_this_run)
+if [[ "${_loops_this_run}" -le 0 ]]; then
+  echo "[INFO] Already completed (${_n}/${_m}). Nothing to do."
+  exit 0
+fi
+
 setup_session
 
 # Start elapsed timer now (fix 00:00:00 issue)
-run_time
+#run_time
 
-# Define consolidated logs
+# Timestamp per loop & log folders
 : "${_session_ts:=$(now_ts)}"
 _run_ts="${_session_ts}"
-#_netlog="${log_root}/net_test_${_run_ts}.log"
-#_netsum="${log_root}/net_summary_${_run_ts}.log"
-  _netlog="${_session_log_dir}/net_test_${_run_ts}.log"
-  _netsum="${_session_log_dir}/net_summary_${_run_ts}.log"
+_netlog="${_session_log_dir}/net_test_${_run_ts}.log"
+_netsum="${_session_log_dir}/net_summary_${_run_ts}.log"
+
+# ---------- Test Header ----------
+## ---------- Start elapsed time now ----------
+run_time || true
 
 if [[ ! -f "${_netlog}" ]]; then
   {
@@ -149,15 +164,15 @@ _set_speed() {
   fi
 }
 
-if [[ -n "${1:-}" ]]; then
-  parse_loops_arg "${1:-}"
-fi
+#if [[ -n "${1:-}" ]]; then
+#  parse_loops_arg "${1:-}"
+#fi
 
 # Main per-pair loop
-for (( loop_n=1; loop_n<=_bLoops; loop_n++ )); do
+for (( loop_n=1; loop_n<=_loops_this_run; loop_n++ )); do
   echo "------------------------------------------------------------"
-  echo "[$loop_n/$_bLoops] Network test..."
-  #echo "[$(counter_next_tag)] Network test..."
+  #echo "[$loop_n/$_target_loops] Network test..."
+  echo "[$(counter_next_tag)] Network test..."
   _km="$(counter_next_tag)"    # e.g. "3/10"
   _k="${_km%%/*}"               # "3"
   _mm="${_km##*/}"              # "10"

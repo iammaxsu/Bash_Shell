@@ -43,20 +43,20 @@ elp_time() {
 #   others                : preseve in REM_ARGS[]
 parse_common_cli() {
   declare -ga REM_ARGS=()
-  unset _cli_loops
+  unset _target_loop
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      sticky|--sticky)       export _session_policy="sticky"  ;;
-      auto|--auto)           export _session_policy="auto"    ;;
-      -n|--force-new)        export _session_force_new=1      ;;
-      --session-id=*)        export _session_id="${1#*=}"     ;;
-      --prefix=*)            export _session_prefix="${1#*=}" ;;
+      #sticky|--sticky)       export _session_policy="sticky"  ;;
+      #auto|--auto)           export _session_policy="auto"    ;;
+      #-n|--force-new)        export _session_force_new=1      ;;
+      #--session-id=*)        export _session_id="${1#*=}"     ;;
+      #--prefix=*)            export _session_prefix="${1#*=}" ;;
       # 1st number is the count of loops
-      ''|*[!0-9]*)           REM_ARGS+=("$1") ;;  # non-number
+      ''|*[!0-9]*)           REM_ARGS+=("$1") ;;      # non-number
       *)
-        if [[ -z "${_cli_loops:-}" ]]; then
-          export _cli_loops="$1"
+        if [[ -z "${_target_loop:-}" ]]; then
+          _target_loop="$1"
         else
           REM_ARGS+=("$1")
         fi
@@ -65,8 +65,8 @@ parse_common_cli() {
     shift
   done
 
-  : "${_cli_loops:=}1"      # default: 1 loop
-  : "${_session_policy:=auto}"      # default policy
+  : "${_target_loop:=1}"      # default: 1 loop
+  #: "${_session_policy:=auto}"      # default policy
 }
 
 # ---------- Session directory & ID ----------
@@ -187,15 +187,15 @@ log_dir() {
 }
 
 # ---------- loops arguement ----------
-parse_loops_arg() {
-  local _loops="${1:-1}"
-  if ! [[ "${_loops}" =~ ^[0-9]+$ ]] || [[ "${_loops}" -lt 1 ]]; then
-    echo "[FATAL] Invalid loop count: '${_loops}'. Using default: 1"
-    _loops=1
-  fi
-  export _bLoops="${_loops}"
-  echo "[INFO] Running ${_bLoops} time(s)"
-}
+#parse_loops_arg() {
+#  local _target_loops="${1:-1}"
+#  if ! [[ "${_target_loops}" =~ ^[0-9]+$ ]] || [[ "${_target_loops}" -lt 1 ]]; then
+#    echo "[FATAL] Invalid loop count: '${_target_loops}'. Using default: 1"
+#    _target_loops=1
+#  fi
+#  export _bLoops="${_target_loops}"
+#  echo "[INFO] Running ${_target_loops} time(s)"
+#}
 
 # ---------- Installers ----------
 __is_debian_like() { [[ -f /etc/debian_version ]]; }
@@ -266,6 +266,7 @@ __move_back_to_root() {
   fi
 }
 
+# ---------- Namespace Approach ----------
 netns_del() {
   local found=0
   # delete literal stray ns_ first if present
@@ -341,7 +342,15 @@ netns_add() {
   echo "[INFO] netns created. even=[${even_ethArray[*]}] odd=[${odd_ethArray[*]}]"
 }
 
-netns_reset() { netns_del; netns_add; }
+netns_reset() {
+  netns_del
+  netns_add
+}
+
+# 小工具：紀錄到主 log
+log() {
+  echo "[$(date '+%F %T')] $*" | tee -a "${_disklog}";
+}
 
 # ---------- Batch counter (n/m) ----------
 # 檔案位置：<logs>/session_state/counter.<name>
@@ -351,7 +360,7 @@ netns_reset() { netns_del; netns_add; }
 #   n=3
 
 counter_init() {
-  local _name="${1:-$(_basename "${BASH_SOURCE[-1]}")}"
+  local _name="${1:-net}"   # 1st parameter: counter name (default: "net")
   local _target="${2:-1}"   # 2nd parameter: target count (default: 1)
 
   # Use the same session_state dir as session.id
@@ -368,11 +377,12 @@ counter_init() {
     # shellcheck disable=SC1090,SC1091
     source "${_counter_file}"     # Import sid, m, & n.
     if [[ -n "${_sid:-}" && -n "${_m:-}" && -n "${_n:-}" && "${_n}" -lt "${_m}" ]]; then
-      export _session_policy="sticky"
+      #export _session_policy="sticky"
       export _session_id="${_sid}"
     fi
   fi
 
+  # Build or rebuild session ID if needed
   ensure_session_id
 
   if [[ ! -s "${_counter_file}" || "${_n:-999999}" -ge "${_m:-0}" || "${_sid:-}" != "${_session_id:-}" ]]; then
@@ -386,20 +396,33 @@ counter_init() {
 
 # Return k/m (k = n+1)
 counter_next_tag() {
-  local _k=$(( (${_n:-0}) + 1 ))
-  printf '%d/%d' "${_k}" "${_m:-1}"
+  local _k=$(( ${_n} + 1 ))
+  if (( _k > _m )); then
+    _k="${_m}"
+  fi
+  printf '%d/%d' "${_k}" "${_m}"
+}
+
+counter_loops_this_run() {
+  local _remain=$(( _m - _n ))
+  local _want="${_target_loop:-1}"
+  (( _remain < 0 )) && _remain=0
+  (( _want < 1 )) && _want=1
+  if (( _want < _remain )); then
+    echo "${_want}"
+  else
+    echo "${_remain}"
+  fi
 }
 
 # Call after each successful loop. n+1 if n >= m, end and cleaar the session.
 counter_tick() {
-  : "${_n:=0}"
-  : "${_m:=1}"
   _n=$(( _n + 1 ))
   printf 'sid=%q\nm=%q\nn=%q\n' "${_session_id}" "${_m}" "${_n}" > "${_counter_file}"
-
   if [[ "${_n}" -ge "${_m}" ]]; then
     # Done: clear the counter & session ID. 
     rm -f -- "${_counter_file}" 2>/dev/null || true
-    clear_session_id 2>/dev/null || unset _session_id
+    rm -rf -- "${_session_state_dir}/session.id" 2>/dev/null || true
+    unset _session_id
   fi
 }

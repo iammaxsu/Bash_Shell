@@ -73,3 +73,39 @@ setup_session() {
 #    fi
 #  fi
 #}
+
+# ---------- iPerf3 Parameters ----------
+# :
+# 
+
+# ---------- fio Parameters ----------
+# : "${_filename:-}"
+# : "${_direct:-1}"
+# : "${_rw:-read}"      # read|write|randread|randwrite|rw|randrw
+# : "${_bs:-1m}"      # block size: 4k|8k|16k|32k|64k|128k|256k|512k|1m|2m|4m
+# : "${_iodepth:-8}"      # i/o depth (thread): 1|2|4|8|16|32|64
+# : "${_numjobs:-1}"      # jobs (process): 1|2|4|8|16|32|64
+# : "${_size:-1g}"      # total size per job: 128m|256m|512m|1g|2g|4g
+# : "${_ioengine:-psync}"     # I/O engine: sync|psync|libaio|mmap|splice
+# : "${_runtime:-5}"      # runtime in seconds: 5|10|15|30|60
+# : "${_name:-test}"
+
+## ---------- Standard ----------
+#     --rw=read      --bs=1m    --iodepth=8   --numjobs=1   --size=1g   --runtime=5
+#     --rw=write     --bs=1m    --iodepth=8   --numjobs=1   --size=1g   --runtime=5
+#     --rw=read      --bs=1m    --iodepth=1   --numjobs=1   --size=1g   --runtime=5
+#     --rw=write     --bs=1m    --iodepth=1   --numjobs=1   --size=1g   --runtime=5
+#     --rw=randread  --bs=4k    --iodepth=32  --numjobs=1   --size=1g   --runtime=5
+#     --rw=randwrite --bs=4k    --iodepth=32  --numjobs=1   --size=1g   --runtime=5
+#     --rw=randread  --bs=4k    --iodepth=1   --numjobs=1   --size=1g   --runtime=5
+#     --rw=randwrite --bs=4k    --iodepth=1   --numjobs=1   --size=1g   --runtime=5
+
+## ---------- NVMe ----------
+#     --rw=read      --bs=1m    --iodepth=8   --numjobs=1   --size=1g   --runtime=5
+#     --rw=write     --bs=1m    --iodepth=8   --numjobs=1   --size=1g   --runtime=5
+#     --rw=read      --bs=128k  --iodepth=32  --numjobs=1   --size=1g   --runtime=5
+#     --rw=write     --bs=128k  --iodepth=32  --numjobs=1   --size=1g   --runtime=5
+#     --rw=randread  --bs=4k    --iodepth=32  --numjobs=16  --size=1g   --runtime=5
+#     --rw=randwrite --bs=4k    --iodepth=32  --numjobs=16  --size=1g   --runtime=5
+#     --rw=randread  --bs=4k    --iodepth=1   --numjobs=1   --size=1g   --runtime=5
+#     --rw=randwrite --bs=4k    --iodepth=1   --numjobs=1   --size=1g   --runtime=5

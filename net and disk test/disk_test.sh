@@ -32,33 +32,56 @@ find_and_source() {
 
 find_and_source "config.sh"
 find_and_source "function.sh"
-
-parse_loops_arg "${1:-}"
+# ---------- Parse CLI parameters ----------
+parse_common_cli "$@"
 
 # ---------- Init logs & session ----------
-log_root="$(log_dir "" 1)" || true
-setup_session || true
+log_dir "" 1
+log_root="${_session_log_dir}"
 
-# 蝯曹??函?撠楝敺?log() { echo "[$(date '+%F %T')] $*" | tee -a "${log_root}/${_disklog}"; }
+# Initialize, m = _target_loop
+counter_init "disk" "${_target_loop:-1}"
 
-# run_fio 銋?葆?韌
-run_fio(){ local dev="$1" out="$2"; shift 2;
+# Calculate how many loops to do
+_loops_this_run=$(counter_loops_this_run)
+if [[ "${_loops_this_run}" -le 0 ]]; then
+  echo "[INFO] Already completed (${_n}/${_m}). Nothing to do."
+  exit 0
+fi
+
+# parse_loops_arg "${1:-}"
+
+# Timestamp per loop & log folders
+: "${_session_ts:=$(now_ts)}"
+_run_ts="${_session_ts}"
+_disklog="${log_root}/disk_test_${_run_ts}.log"
+_disksum="${log_root}/disk_summary_${_run_ts}.log"
+
+# ---------- Test Header ----------
+## ---------- Start elapsed time now ----------
+run_time || true
+
+if [[ ! -f "${_disklog}" ]]; then
+  {
+    echo "============= Disk Test (${_run_ts}) ============="
+    echo "Host: $(hostname)   User: $(whoami)"
+    echo "API: ${_function_api_version}"
+    echo "=================================================="
+  } > "${_disklog}"
+fi
+
+# fio 包裝
+run_fio() { 
+  local dev="$1" out="$2"
+  shift 2
   sudo fio --filename="$dev" --group_reporting --name=test \
     --output="${log_root}/${out}" --direct=1 "$@"
 }
 
-summary_file="${log_root}/disk_summary_${_date_format2}.log"
-
-: "${_date_format2:?Missing. Please set _date_format2 in config.sh (setup_session).}"
-: "${_bLoops:?Missing. Please set _bLoops in config.sh (e.g., _bLoops=10).}"
-: "${_disklog:?Missing. Please set _disklog in config.sh (e.g., disk_test_${_date_format2}.log).}"
-
-log() { echo "[$(date '+%F %T')] $*" | tee -a "${_disklog}"; }
-
-log "==== disk_test.sh (from config/function) ===="
+log "==== disk_test.sh ===="
 log "Script   : ${_entry}"
-log "LogPath  : ${PWD}"
-log "Loops    : ${_bLoops}"
+log "LogPath  : ${log_root}"
+log "Target m : ${_m}    Done n: ${_n}    This run loops: ${_loops_this_run}"
 log "============================================="
 
 # ---------- Ensure tools ----------
@@ -134,7 +157,9 @@ log "----------------------------------------"
 
 SAFE=()
 for d in "${_ALL_DISKS[@]}"; do
-  if [[ -z "${_UNSAFE[$d]:-}" ]]; then SAFE+=("/dev/${d}"); fi
+  if [[ -z "${_UNSAFE[$d]:-}" ]]; then 
+    SAFE+=("/dev/${d}")
+  fi
 done
 
 if [[ ${#SAFE[@]} -eq 0 ]]; then
@@ -146,81 +171,91 @@ log "SAFE targets: ${SAFE[*]}"
 log "WARNING: Destructive fio on: ${SAFE[*]}"
 if [[ "${YES_I_UNDERSTAND:-0}" != "1" ]]; then
   read -r -p "Type YES to proceed: " _ans || true
-  if [[ "${_ans:-}" != "YES" ]]; then log "Cancelled."; exit 0; fi
+  if [[ "${_ans:-}" != "YES" ]]; then 
+    log "Cancelled."
+    exit 0
+  fi
 fi
 
-for (( loop_n=1; loop_n<=_bLoops; loop_n++ )); do
-    echo "------------------------------------------------------------"
-    echo "[$loop_n/$_bLoops] Disk test..."
-# ---------- FIO patterns ----------
-    run_fio(){ local dev="$1" out="$2"; shift 2; sudo fio --filename="$dev" --group_reporting --name=test --output="$out" --direct=1 "$@"; }
+for (( loop_n=1; loop_n<=_loops_this_run; loop_n++ )); do
+  echo "------------------------------------------------------------"
+  echo "[$(counter_next_tag)] Disk test..."
+  km="$(counter_next_tag)"
+  k="${km%%/*}"
+  mm="${km##*/}"
+  log "----- Iteration ${k} of ${mm} -----"
 
-    loops="${_bLoops}"
-    for ((n=1;n<=loops;n++)); do
-      log "=== FIO Loop ${n}/${loops} ==="
-      for dev in "${SAFE[@]}"; do
-        short="${dev#/dev/}"; log "[RUN] ${dev} (loop ${n})"
-        run_fio "$dev" "seq_r_1M_Q8T1_${n}_${short}.log"   --rw=read      --bs=1M --iodepth=8  --numjobs=1 --size=1G --runtime=30
-        run_fio "$dev" "seq_w_1M_Q8T1_${n}_${short}.log"   --rw=write     --bs=1M --iodepth=8  --numjobs=1 --size=1G --runtime=30
-        run_fio "$dev" "seq_r_1M_Q1T1_${n}_${short}.log"   --rw=read      --bs=1M --iodepth=1  --numjobs=1 --size=1G --runtime=30
-        run_fio "$dev" "seq_w_1M_Q1T1_${n}_${short}.log"   --rw=write     --bs=1M --iodepth=1  --numjobs=1 --size=1G --runtime=30
-        run_fio "$dev" "rnd_r_4K_Q32T1_${n}_${short}.log"  --rw=randread  --bs=4k --iodepth=32 --numjobs=1 --size=1G --runtime=30
-        run_fio "$dev" "rnd_w_4K_Q32T1_${n}_${short}.log"  --rw=randwrite --bs=4k --iodepth=32 --numjobs=1 --size=1G --runtime=30
-        run_fio "$dev" "rnd_r2_4K_Q32T1_${n}_${short}.log" --rw=randread  --bs=4k --iodepth=32 --numjobs=1 --size=1G --runtime=30
-        run_fio "$dev" "rnd_w2_4K_Q32T1_${n}_${short}.log" --rw=randwrite --bs=4k --iodepth=32 --numjobs=1 --size=1G --runtime=30
-      done
-    done
+  n="${k}"   # 這一輪的編號（避免覆蓋）
+  for dev in "${SAFE[@]}"; do
+    _short="${dev#/dev/}"
+    log "[RUN] ${dev} (loop ${n})"
+    run_fio "$dev" "${_short}_SEQ1MQ8T1_Read_${n}_of_${_target_loop}.log"   --rw=read      --bs=1m --iodepth=8  --numjobs=1 --size=1g --runtime=5
+    run_fio "$dev" "${_short}_SEQ1MQ8T1_Write_${n}_of_${_target_loop}.log"  --rw=write     --bs=1m --iodepth=8  --numjobs=1 --size=1g --runtime=5
+    run_fio "$dev" "${_short}_SEQ1MQ1T1_Read_${n}_of_${_target_loop}.log"   --rw=read      --bs=1m --iodepth=1  --numjobs=1 --size=1g --runtime=5
+    run_fio "$dev" "${_short}_SEQ1MQ1T1_Write_${n}_of_${_target_loop}.log"  --rw=write     --bs=1m --iodepth=1  --numjobs=1 --size=1g --runtime=5
+    run_fio "$dev" "${_short}_RND4KQ32T1_Read_${n}_of_${_target_loop}.log"  --rw=randread  --bs=4k --iodepth=32 --numjobs=1 --size=1g --runtime=5
+    run_fio "$dev" "${_short}_RND4KQ32T1_Write_${n}_of_${_target_loop}.log" --rw=randwrite --bs=4k --iodepth=32 --numjobs=1 --size=1g --runtime=5
+    run_fio "$dev" "${_short}_RND4KQ1T1_Read_${n}_of_${_target_loop}.log"   --rw=randread  --bs=4k --iodepth=1  --numjobs=1 --size=1g --runtime=5
+    run_fio "$dev" "${_short}_RND4KQ1T1_Write_${n}_of_${_target_loop}.log"  --rw=randwrite --bs=4k --iodepth=1  --numjobs=1 --size=1g --runtime=5
+  done    
 
-    # ---------- Summary ----------
-    summary_file="disk_summary_${_date_format2}.log"; : > "${summary_file}"
-    extract_bw(){ grep -E "^\s*$1:" "$2" | sed -n 's/.*bw=\([0-9.]\+\)[KMG]i\?B\/s (\([0-9.]\+\)[KMG]B\/s.*/\1 \2/p' | head -n1; }
+# ---------- Summary ----------
+: > "${_disksum}"
+extract_bw() {
+  local _kind="$1" _file="$2"
+  grep -iE "^\s*${_kind,,}:" "$_file" \
+    | sed -n 's/.*bw=\([0-9.]\+\)[KMG]i\?B\/s (\([0-9.]\+\)[KMG]B\/s.*/\1 \2/p' \
+    | head -n1
+}
 
-    for dev in "${SAFE[@]}"; do
-      short="${dev#/dev/}"
-      {
-        echo "Disk: $short"
-        patterns=(
-          "seq_r_1M_Q8T1 READ"
-          "seq_w_1M_Q8T1 WRITE"
-          "seq_r_1M_Q1T1 READ"
-          "seq_w_1M_Q1T1 WRITE"
-          "rnd_r_4K_Q32T1 READ"
-          "rnd_w_4K_Q32T1 WRITE"
-          "rnd_r2_4K_Q32T1 READ"
-          "rnd_w2_4K_Q32T1 WRITE"
-        )
-        for item in "${patterns[@]}"; do
-          base="${item%% *}"
-          kind="${item##* }"
-          mib_total=0; mb_total=0; cnt=0
-          for ((n=1;n<=loops;n++)); do
-            f="${base}_${n}_${short}.log"
-            if [[ -f "$f" ]]; then
-              v="$(extract_bw "$kind" "$f")"
-              if [[ -n "$v" ]]; then
-                mib="$(echo "$v" | awk '{print $1}')"; mb="$(echo "$v" | awk '{print $2}')"
-                mib_total=$(awk -v a="$mib_total" -v b="$mib" 'BEGIN{print a+b}')
-                mb_total=$(awk -v a="$mb_total" -v b="$mb" 'BEGIN{print a+b}')
-                cnt=$((cnt+1))
-              fi
-            fi
-          done
-          if [[ $cnt -gt 0 ]]; then
-            mib_avg=$(awk -v a="$mib_total" -v c="$cnt" 'BEGIN{printf "%.3f", a/c}')
-            mb_avg=$(awk -v a="$mb_total" -v c="$cnt" 'BEGIN{printf "%.3f", a/c}')
-            printf "  %-18s %-5s : avg=%s MiB/s (%s MB/s)\n" "$base" "$kind" "$mib_avg" "$mb_avg"
-          else
-            printf "  %-18s %-5s : no data\n" "$base" "$kind"
-          fi
+for dev in "${SAFE[@]}"; do
+  _short="${dev#/dev/}"
+  {
+    echo "Disk: $_short"
+    patterns=(
+      "SEQ1MQ8T1 Read"
+      "SEQ1MQ8T1 Write"
+      "SEQ1MQ1T1 Read"
+      "SEQ1MQ1T1 Write"
+      "RND4KQ32T1 Read"
+      "RND4KQ32T1 Write"
+      "RND4KQ1T1 Read"
+      "RND4KQ1T1 Write"
+    )
+    for item in "${patterns[@]}"; do
+      base="${item%% *}"
+      _kind="${item##* }"
+      mib_total=0; mb_total=0; cnt=0
+      for ((n=1;n<=_m;n++)); do
+        for f in "${log_root}/${_short}_${base}_${_kind}_${n}_of_"*.log; do
+          [[ -f "$f" ]] || continue
+          v="$(extract_bw "$_kind" "$f")"
+          [[ -n "$v" ]] || continue
+
+          mib="$(echo "$v" | awk '{print $1}')"
+          mb="$(echo "$v"  | awk '{print $2}')"
+
+          # 加總（用 awk 避免 bash 浮點）
+          mib_total=$(awk -v a="$mib_total" -v b="$mib" 'BEGIN{print a+b}')
+          mb_total=$(awk -v a="$mb_total" -v b="$mb"  'BEGIN{print a+b}')
+          cnt=$((cnt+1))
         done
-        echo
-      } >> "${summary_file}"
+      done
+      if [[ $cnt -gt 0 ]]; then
+        mib_avg=$(awk -v a="$mib_total" -v c="$cnt" 'BEGIN{printf "%.3f", a/c}')
+        mb_avg=$(awk -v a="$mb_total" -v c="$cnt" 'BEGIN{printf "%.3f", a/c}')
+        printf "  %-18s %-5s : avg=%s MiB/s (%s MB/s)\n" "$base" "$_kind" "$mib_avg" "$mb_avg"
+      else
+        printf "  %-18s %-5s : no data\n" "$base" "$_kind"
+      fi
     done
+    echo
+  } >> "${_disksum}"
 done
 
-run_time || true
+counter_tick
+
+done  # for loop_n
 echo "" | tee -a "${_disklog}"
 elp_time | tee -a "${_disklog}"
-log "Summary written to: ${summary_file}"
-
-
+log "Summary written to: ${_disksum}"
