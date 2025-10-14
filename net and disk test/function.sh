@@ -426,3 +426,30 @@ counter_tick() {
     unset _session_id
   fi
 }
+
+# ---------- fio: assess whether the dev is NVMe or not ----------
+fio_is_nvme() {
+  [[ "$1" == /dev/nvme* ]]
+}
+
+# ---------- Return fio_tests array ----------
+build_fio_tests_for_dev() {
+  local _dev="$1"
+  FIO_TESTS=()
+  if fio_is_nvme "${_dev}"; then
+    FIO_TESTS+=("${FIO_TESTS_NVME[@]}")
+  else
+    FIO_TESTS+=("${FIO_TESTS_SATA[@]}")
+  fi
+}
+
+# ---------- Return summary pattern for dev ----------
+build_fio_summary_patterns_for_dev() {
+  local dev="$1"
+  SUMMARY_PATTERNS=()
+  if [[ "$dev" == /dev/nvme* ]]; then
+    SUMMARY_PATTERNS=("${FIO_SUMMARY_NVME[@]}")
+  else
+    SUMMARY_PATTERNS=("${FIO_SUMMARY_SATA[@]}")
+  fi
+}

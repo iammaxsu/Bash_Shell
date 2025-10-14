@@ -79,18 +79,7 @@ setup_session() {
 # 
 
 # ---------- fio Parameters ----------
-# : "${_filename:-}"
-# : "${_direct:-1}"
-# : "${_rw:-read}"      # read|write|randread|randwrite|rw|randrw
-# : "${_bs:-1m}"      # block size: 4k|8k|16k|32k|64k|128k|256k|512k|1m|2m|4m
-# : "${_iodepth:-8}"      # i/o depth (thread): 1|2|4|8|16|32|64
-# : "${_numjobs:-1}"      # jobs (process): 1|2|4|8|16|32|64
-# : "${_size:-1g}"      # total size per job: 128m|256m|512m|1g|2g|4g
-# : "${_ioengine:-psync}"     # I/O engine: sync|psync|libaio|mmap|splice
-# : "${_runtime:-5}"      # runtime in seconds: 5|10|15|30|60
-# : "${_name:-test}"
-
-## ---------- Standard ----------
+# ===== Basis =====
 #     --rw=read      --bs=1m    --iodepth=8   --numjobs=1   --size=1g   --runtime=5
 #     --rw=write     --bs=1m    --iodepth=8   --numjobs=1   --size=1g   --runtime=5
 #     --rw=read      --bs=1m    --iodepth=1   --numjobs=1   --size=1g   --runtime=5
@@ -109,3 +98,63 @@ setup_session() {
 #     --rw=randwrite --bs=4k    --iodepth=32  --numjobs=16  --size=1g   --runtime=5
 #     --rw=randread  --bs=4k    --iodepth=1   --numjobs=1   --size=1g   --runtime=5
 #     --rw=randwrite --bs=4k    --iodepth=1   --numjobs=1   --size=1g   --runtime=5
+
+# ===== Basis =====
+: "${_fio_direct:=1}"
+: "${_fio_size:=1g}"      # total size per job: 128m|256m|512m|1g|2g|4g
+: "${_fio_runtime:=5}"      # runtime in seconds: 5|10|15|30|60
+: "${_fio_ramp:=0}"
+: "${_fio_name:=test}"
+: "${_fio_ioengine:=psync}"      # sync|psync|libaio|mmap|pvsync|pvsync2
+
+# ===== Parameter list for SATA =====
+# Format: "BASE  RW  BS   IODEPTH  NUMJOBS"
+# BASE: Show in filename & summary, e.g. SEQ1MQ8T1、RND4KQ32T1. 
+FIO_TESTS_SATA=(
+  "SEQ1MQ8T1      read          1m      8     1"
+  "SEQ1MQ8T1      write         1m      8     1"
+  "SEQ1MQ1T1      read          1m      1     1"
+  "SEQ1MQ1T1      write         1m      1     1"
+  "RND4KQ32T1     randread      4k      32    1"
+  "RND4KQ32T1     randwrite     4k      32    1"
+  "RND4KQ1T1      randread      4k      1     1"
+  "RND4KQ1T1      randwrite     4k      1     1"
+)
+
+# ===== Parameter list for NVMe =====
+# Format: "BASE  RW  BS   IODEPTH  NUMJOBS"
+# BASE: Show in filename & summary, e.g. SEQ1MQ8T1、RND4KQ32T1. 
+FIO_TESTS_NVME=(
+  "SEQ1MQ8T1      read          1m      8     1"
+  "SEQ1MQ8T1      write         1m      8     1"
+  "SEQ128KQ32T1   read          128K    32    1"
+  "SEQ128KQ32T1   write         128K    32    1"
+  "RND4KQ32T16    randread      4k      32    16"
+  "RND4KQ32T16    randwrite     4k      32    16"
+  "RND4KQ1T1      randread      4k      1     1"
+  "RND4KQ1T1      randwrite     4k      1     1"
+)
+
+# ===== Summary patterns for SATA =====
+FIO_SUMMARY_SATA=(
+  "SEQ1MQ8T1      Read"
+  "SEQ1MQ8T1      Write"
+  "SEQ1MQ1T1      Read"
+  "SEQ1MQ1T1      Write"
+  "RND4KQ32T1     Read"
+  "RND4KQ32T1     Write"
+  "RND4KQ1T1      Read"
+  "RND4KQ1T1      Write"
+)
+
+# ===== Summary patterns for NVMe =====
+FIO_SUMMARY_NVME=(
+  "SEQ1MQ8T1      Read"
+  "SEQ1MQ8T1      Write"
+  "SEQ128KQ32T1   Read"
+  "SEQ128KQ32T1   Write"
+  "RND4KQ32T16    Read"
+  "RND4KQ32T16    Write"
+  "RND4KQ1T1      Read"
+  "RND4KQ1T1      Write"
+)

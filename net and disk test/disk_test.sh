@@ -72,10 +72,17 @@ fi
 
 # fio 包裝
 run_fio() { 
-  local dev="$1" out="$2"
+  local _dev="$1" _out="$2"
   shift 2
-  sudo fio --filename="$dev" --group_reporting --name=test \
-    --output="${log_root}/${out}" --direct=1 "$@"
+  sudo fio \
+    --name="${_fio_name}" \
+    --filename="${_dev}" \
+    --group_reporting \
+    --direct="${_fio_direct:-1}" \
+    --size="${_fio_size:-1g}" \
+    --ioengine="${_fio_ioengine}" \
+    --output="${log_root}/${_out}" \
+    "$@"
 }
 
 log "==== disk_test.sh ===="
@@ -186,67 +193,140 @@ for (( loop_n=1; loop_n<=_loops_this_run; loop_n++ )); do
   log "----- Iteration ${k} of ${mm} -----"
 
   n="${k}"   # 這一輪的編號（避免覆蓋）
-  for dev in "${SAFE[@]}"; do
-    _short="${dev#/dev/}"
-    log "[RUN] ${dev} (loop ${n})"
-    run_fio "$dev" "${_short}_SEQ1MQ8T1_Read_${n}_of_${_target_loop}.log"   --rw=read      --bs=1m --iodepth=8  --numjobs=1 --size=1g --runtime=5
-    run_fio "$dev" "${_short}_SEQ1MQ8T1_Write_${n}_of_${_target_loop}.log"  --rw=write     --bs=1m --iodepth=8  --numjobs=1 --size=1g --runtime=5
-    run_fio "$dev" "${_short}_SEQ1MQ1T1_Read_${n}_of_${_target_loop}.log"   --rw=read      --bs=1m --iodepth=1  --numjobs=1 --size=1g --runtime=5
-    run_fio "$dev" "${_short}_SEQ1MQ1T1_Write_${n}_of_${_target_loop}.log"  --rw=write     --bs=1m --iodepth=1  --numjobs=1 --size=1g --runtime=5
-    run_fio "$dev" "${_short}_RND4KQ32T1_Read_${n}_of_${_target_loop}.log"  --rw=randread  --bs=4k --iodepth=32 --numjobs=1 --size=1g --runtime=5
-    run_fio "$dev" "${_short}_RND4KQ32T1_Write_${n}_of_${_target_loop}.log" --rw=randwrite --bs=4k --iodepth=32 --numjobs=1 --size=1g --runtime=5
-    run_fio "$dev" "${_short}_RND4KQ1T1_Read_${n}_of_${_target_loop}.log"   --rw=randread  --bs=4k --iodepth=1  --numjobs=1 --size=1g --runtime=5
-    run_fio "$dev" "${_short}_RND4KQ1T1_Write_${n}_of_${_target_loop}.log"  --rw=randwrite --bs=4k --iodepth=1  --numjobs=1 --size=1g --runtime=5
-  done    
+ # for dev in "${SAFE[@]}"; do
+ #   _short="${dev#/dev/}"
+ #   log "[RUN] ${dev} (loop ${n})"
+ #   run_fio "$dev" "${_short}_SEQ1MQ8T1_Read_${n}_of_${_target_loop}.log"   --rw=read      --bs=1m --iodepth=8  --numjobs=1 --size=1g --runtime=5
+ #   run_fio "$dev" "${_short}_SEQ1MQ8T1_Write_${n}_of_${_target_loop}.log"  --rw=write     --bs=1m --iodepth=8  --numjobs=1 --size=1g --runtime=5
+ #   run_fio "$dev" "${_short}_SEQ1MQ1T1_Read_${n}_of_${_target_loop}.log"   --rw=read      --bs=1m --iodepth=1  --numjobs=1 --size=1g --runtime=5
+ #   run_fio "$dev" "${_short}_SEQ1MQ1T1_Write_${n}_of_${_target_loop}.log"  --rw=write     --bs=1m --iodepth=1  --numjobs=1 --size=1g --runtime=5
+ #   run_fio "$dev" "${_short}_RND4KQ32T1_Read_${n}_of_${_target_loop}.log"  --rw=randread  --bs=4k --iodepth=32 --numjobs=1 --size=1g --runtime=5
+ #   run_fio "$dev" "${_short}_RND4KQ32T1_Write_${n}_of_${_target_loop}.log" --rw=randwrite --bs=4k --iodepth=32 --numjobs=1 --size=1g --runtime=5
+ #   run_fio "$dev" "${_short}_RND4KQ1T1_Read_${n}_of_${_target_loop}.log"   --rw=randread  --bs=4k --iodepth=1  --numjobs=1 --size=1g --runtime=5
+ #   run_fio "$dev" "${_short}_RND4KQ1T1_Write_${n}_of_${_target_loop}.log"  --rw=randwrite --bs=4k --iodepth=1  --numjobs=1 --size=1g --runtime=5
+ # done    
+
+for dev in "${SAFE[@]}"; do
+  _short="${dev#/dev/}"
+  log "[RUN] ${dev} (loop ${n})"
+
+  # 依裝置型別建立要跑的測試清單（讀自 config.sh）
+  build_fio_tests_for_dev "$dev"
+
+  # 逐項執行：BASE RW BS IODEPTH NUMJOBS
+  for spec in "${FIO_TESTS[@]}"; do
+    read -r BASE RW BS IOD NJ <<<"$spec"
+    # 檔名：<短名>_<BASE>_<Read|Write>_<n>_of_<目標>.log
+    # （將 randread/randwrite 轉成人眼友善的 Read/Write 兩類）
+    case "$RW" in
+      read|randread)   KIND="Read"  ;;
+      write|randwrite) KIND="Write" ;;
+      *)               KIND="$RW"   ;;
+    esac
+    out="${_short}_${BASE}_${KIND}_${n}_of_${_target_loop}.log"
+    run_fio "$dev" "$out" --rw="$RW" --bs="$BS" --iodepth="$IOD" --numjobs="$NJ"
+  done
+done
 
 # ---------- Summary ----------
+#: > "${_disksum}"
+#extract_bw() {
+#  local _kind="$1" _file="$2"
+#  grep -iE "^\s*${_kind,,}:" "$_file" \
+#    | sed -n 's/.*bw=\([0-9.]\+\)[KMG]i\?B\/s (\([0-9.]\+\)[KMG]B\/s.*/\1 \2/p' \
+#    | head -n1
+#}
+#
+#for dev in "${SAFE[@]}"; do
+#  _short="${dev#/dev/}"
+#  {
+#    echo "Disk: $_short"
+#    patterns=(
+#      "SEQ1MQ8T1 Read"
+#      "SEQ1MQ8T1 Write"
+#      "SEQ1MQ1T1 Read"
+#      "SEQ1MQ1T1 Write"
+#      "RND4KQ32T1 Read"
+#      "RND4KQ32T1 Write"
+#      "RND4KQ1T1 Read"
+#      "RND4KQ1T1 Write"
+#    )
+#    for item in "${patterns[@]}"; do
+#      base="${item%% *}"
+#      _kind="${item##* }"
+#      mib_total=0; mb_total=0; cnt=0
+#      for ((n=1;n<=_m;n++)); do
+#        for f in "${log_root}/${_short}_${base}_${_kind}_${n}_of_"*.log; do
+#          [[ -f "$f" ]] || continue
+#          v="$(extract_bw "$_kind" "$f")"
+#          [[ -n "$v" ]] || continue
+#
+#          mib="$(echo "$v" | awk '{print $1}')"
+#          mb="$(echo "$v"  | awk '{print $2}')"
+#
+#          # 加總（用 awk 避免 bash 浮點）
+#          mib_total=$(awk -v a="$mib_total" -v b="$mib" 'BEGIN{print a+b}')
+#          mb_total=$(awk -v a="$mb_total" -v b="$mb"  'BEGIN{print a+b}')
+#          cnt=$((cnt+1))
+#        done
+#      done
+#      if [[ $cnt -gt 0 ]]; then
+#        mib_avg=$(awk -v a="$mib_total" -v c="$cnt" 'BEGIN{printf "%.3f", a/c}')
+#        mb_avg=$(awk -v a="$mb_total" -v c="$cnt" 'BEGIN{printf "%.3f", a/c}')
+#        printf "  %-18s %-5s : avg=%s MiB/s (%s MB/s)\n" "$base" "$_kind" "$mib_avg" "$mb_avg"
+#      else
+#        printf "  %-18s %-5s : no data\n" "$base" "$_kind"
+#      fi
+#    done
+#    echo
+#  } >> "${_disksum}"
+#done
+# ---------- Summary ----------
 : > "${_disksum}"
+
+# 從 fio 檔抓讀/寫 BW；大小寫不敏感；回傳 "MiB/s MB/s"
 extract_bw() {
-  local _kind="$1" _file="$2"
-  grep -iE "^\s*${_kind,,}:" "$_file" \
+  local kind="$1" file="$2"
+  grep -iE "^\s*${kind,,}:" "$file" \
     | sed -n 's/.*bw=\([0-9.]\+\)[KMG]i\?B\/s (\([0-9.]\+\)[KMG]B\/s.*/\1 \2/p' \
     | head -n1
 }
 
 for dev in "${SAFE[@]}"; do
-  _short="${dev#/dev/}"
-  {
-    echo "Disk: $_short"
-    patterns=(
-      "SEQ1MQ8T1 Read"
-      "SEQ1MQ8T1 Write"
-      "SEQ1MQ1T1 Read"
-      "SEQ1MQ1T1 Write"
-      "RND4KQ32T1 Read"
-      "RND4KQ32T1 Write"
-      "RND4KQ1T1 Read"
-      "RND4KQ1T1 Write"
-    )
-    for item in "${patterns[@]}"; do
-      base="${item%% *}"
-      _kind="${item##* }"
-      mib_total=0; mb_total=0; cnt=0
-      for ((n=1;n<=_m;n++)); do
-        for f in "${log_root}/${_short}_${base}_${_kind}_${n}_of_"*.log; do
-          [[ -f "$f" ]] || continue
-          v="$(extract_bw "$_kind" "$f")"
-          [[ -n "$v" ]] || continue
+  short="${dev#/dev/}"
 
+  # 針對這顆裝置挑「自己的 8 條」pattern（來自 config.sh）
+  build_fio_summary_patterns_for_dev "$dev"
+
+  {
+    echo "Disk: $short"
+    for item in "${SUMMARY_PATTERNS[@]}"; do
+      base="${item%% *}"   # 例：SEQ1MQ8T1 / SEQ128KQ32T1 / RND4KQ32T1 ...
+      kind="${item##* }"   # Read / Write
+
+      mib_total=0; mb_total=0; cnt=0
+      # 掃 1.._m（m 是本批次目標回合），只統計這顆該 pattern 的檔案
+      for ((n=1; n<=_m; n++)); do
+        # 檔名樣式：<short>_<BASE>_<Kind>_<n>_of_*.log
+        for f in "${log_root}/${short}_${base}_${kind}_${n}_of_"*.log; do
+          [[ -f "$f" ]] || continue
+          v="$(extract_bw "$kind" "$f")"
+          [[ -n "$v" ]] || continue
           mib="$(echo "$v" | awk '{print $1}')"
           mb="$(echo "$v"  | awk '{print $2}')"
-
-          # 加總（用 awk 避免 bash 浮點）
           mib_total=$(awk -v a="$mib_total" -v b="$mib" 'BEGIN{print a+b}')
           mb_total=$(awk -v a="$mb_total" -v b="$mb"  'BEGIN{print a+b}')
           cnt=$((cnt+1))
         done
       done
+
       if [[ $cnt -gt 0 ]]; then
         mib_avg=$(awk -v a="$mib_total" -v c="$cnt" 'BEGIN{printf "%.3f", a/c}')
         mb_avg=$(awk -v a="$mb_total" -v c="$cnt" 'BEGIN{printf "%.3f", a/c}')
-        printf "  %-18s %-5s : avg=%s MiB/s (%s MB/s)\n" "$base" "$_kind" "$mib_avg" "$mb_avg"
+        printf "  %-18s %-5s : avg=%s MiB/s (%s MB/s)\n" "$base" "$kind" "$mib_avg" "$mb_avg"
       else
-        printf "  %-18s %-5s : no data\n" "$base" "$_kind"
+        # 這顆裝置該有的 8 條之一，但目前找不到資料 → 顯示 no data
+        printf "  %-18s %-5s : no data\n" "$base" "$kind"
       fi
     done
     echo
