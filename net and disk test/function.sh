@@ -200,21 +200,48 @@ log_dir() {
 # ---------- Installers ----------
 __is_debian_like() { [[ -f /etc/debian_version ]]; }
 __is_redhat_like() { [[ -f /etc/redhat-release ]]; }
+
 __pkg_install() {
-  local pkg="$1"
+  # 用法：__pkg_install pkg1 [pkg2 ...]
+  local pkgs=("$@")
   if __is_debian_like; then
-    sudo apt-get update -y
-    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "$pkg"
+    if [[ "${_APT_UPDATED:-0}" != "1" ]]; then
+      sudo DEBIAN_FRONTEND=noninteractive apt-get update -y >/dev/null 2>&1 || true
+      _APT_UPDATED=1
+    fi
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${pkgs[@]}"
   elif __is_redhat_like; then
-    if command -v dnf >/dev/null 2>&1; then sudo dnf install -y "$pkg"; else sudo yum install -y "$pkg"; fi
+    if command -v dnf >/dev/null 2>&1; then
+      sudo dnf install -y "${pkgs[@]}"
+    else
+      sudo yum install -y "${pkgs[@]}"
+    fi
   else
-    echo "[WARN] Unknown distro; please install '$pkg' manually"
+    echo "[WARN] Unknown distro; please install: ${pkgs[*]}" >&2
     return 1
   fi
 }
-fio_install()     { command -v fio     >/dev/null 21>&1 && return 0; __pkg_install fio; }
-ethtool_install() { command -v ethtool >/dev/null 2>&1 && return 0; __pkg_install ethtool; }
-iperf3_install()  { command -v iperf3  >/dev/null 2>&1 && return 0; __pkg_install iperf3; }
+
+fio_install()       { command -v fio       >/dev/null 2>&1 && return 0; __pkg_install fio; }
+ethtool_install()   { command -v ethtool   >/dev/null 2>&1 && return 0; __pkg_install ethtool; }
+iperf3_install()    { command -v iperf3    >/dev/null 2>&1 && return 0; __pkg_install iperf3; }
+smartctl_install()  { command -v smartctl  >/dev/null 2>&1 && return 0; __pkg_install smartmontools; }
+hdparm_install()    { command -v hdparm    >/dev/null 2>&1 && return 0; __pkg_install hdparm; }
+
+ensure_tools() {
+  # 用法：ensure_tools smartctl hdparm iperf3
+  local t
+  for t in "$@"; do
+    case "$t" in
+      smartctl) smartctl_install >/dev/null 2>&1 || true ;;
+      hdparm)   hdparm_install   >/dev/null 2>&1 || true ;;
+      iperf3)   iperf3_install   >/dev/null 2>&1 || true ;;
+      fio)      fio_install      >/dev/null 2>&1 || true ;;
+      ethtool)  ethtool_install  >/dev/null 2>&1 || true ;;
+      *) : ;;
+    esac
+  done
+}
 
 # ---------- iperf3 control ----------
 iperf3_is_running() { pgrep -f '(^|/| )iperf3( |$)' >/dev/null 2>&1; }
@@ -452,4 +479,415 @@ build_fio_summary_patterns_for_dev() {
   else
     SUMMARY_PATTERNS=("${FIO_SUMMARY_SATA[@]}")
   fi
+}
+
+# ---------- USB helpers (reusable by detect_usb / detect_storage) ----------
+
+# 由 block 裝置名 (e.g. sda) 找到對應的 USB sysfs 節點路徑；回傳空字串代表不是 USB。
+usb_sysnode_for_block() {
+  # usage: usb_sysnode_for_block sda
+  local name="$1" sys cur
+  sys="/sys$(udevadm info -q path -n "/dev/${name}" 2>/dev/null || true)"
+  [[ -z "$sys" ]] && return 1
+  cur="$sys"
+  while [[ -n "$cur" && "$cur" != "/" ]]; do
+    # USB 裝置節點通常會有 /speed 與 /busnum /devnum
+    if [[ -f "$cur/speed" && -f "$cur/busnum" && -f "$cur/devnum" ]]; then
+      printf '%s\n' "$cur"; return 0
+    fi
+    cur="$(dirname "$cur")"
+  done
+  return 1
+}
+
+# 讀取目前連線速率 (Mb/s)；回傳數字（如 480/5000/10000/20000），失敗回 "?"
+usb_current_speed_mbps() {
+  # usage: usb_current_speed_mbps /sys/bus/usb/devices/1-3/...
+  local node="$1" v
+  if [[ -r "$node/speed" ]]; then
+    v="$(tr -d $'\r\n' < "$node/speed")"
+    [[ -n "$v" ]] && { printf '%s\n' "$v"; return 0; }
+  fi
+  printf '?\n'
+}
+
+# 讀取 USB bcdUSB（裝置宣稱的 USB 版本），例如 2.00 / 3.20；失敗回 "?"
+usb_bcd_version() {
+  local node="$1" v
+  if [[ -r "$node/version" ]]; then
+    v="$(tr -d $'\r\n' < "$node/version")"
+    [[ -n "$v" ]] && { printf '%s\n' "$v"; return 0; }
+  fi
+  printf '?\n'
+}
+
+# Mb/s → 人類可讀（支援小數）
+usb_fmt_speed() {
+  # usage: usb_fmt_speed 5000   -> "5 Gb/s"
+  #        usb_fmt_speed 1.5    -> "1.5 Mb/s"
+  local mbps="$1"
+
+  # 空值或問號直接回傳
+  [[ -z "${mbps:-}" || "${mbps}" == "?" ]] && { echo "?"; return; }
+
+  # 必須是數字（允許小數）
+  if [[ ! "$mbps" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    echo "?"
+    return
+  fi
+
+  # 用 awk 做浮點比較與格式化（避免 [[ -ge ]] 的整數限制）
+  awk -v x="$mbps" 'BEGIN{
+    if (x >= 1000) { printf "%.0f Gb/s", x/1000.0 }
+    else           { printf "%g Mb/s",  x }
+  }'
+}
+
+# 從 lsusb 解析 *宣稱支援* 的 SuperSpeedPlus 模式（Gen 1x1/2x1/2x2…），回「逗號分隔的列表」。
+# 需要 busnum/devnum；抓不到就回空字串。
+usb_supported_gens_from_lsusb() {
+  # usage: usb_supported_gens_from_lsusb 001 005
+  local bus="$1" dev="$2" out modes
+  command -v lsusb >/dev/null 2>&1 || { echo ""; return 0; }
+  out="$(lsusb -s "${bus}:${dev}" -v 2>/dev/null || true)"
+  [[ -z "$out" ]] && { echo ""; return 0; }
+
+  # 解析 SuperSpeedPlus 區段的支援模式行（不同版本 lsusb 字樣略有差異）
+  modes="$(printf '%s\n' "$out" \
+    | awk '
+      /SuperSpeedPlus USB Device Capability/ {ss=1; next}
+      ss && /Supported operating modes/ {so=1; next}
+      ss && so {
+        if ($0 ~ /^[[:space:]]*$/) exit
+        g=$0; sub(/^[[:space:]]*/,"",g); sub(/[[:space:]]*$/,"",g)
+        # 常見輸出例： "Gen 2x1", "Gen 1x2", "Gen 2x2"
+        if (g ~ /^Gen [0-9]+x[0-9]+$/) { print g }
+      }
+    ' \
+    | paste -sd', ' -)"
+  echo "$modes"
+}
+
+# 將 Gen NxM 映射為速率文字（粗略對照：Gen1=5Gb/s, Gen2=10Gb/s；Nx2 ≈ *2）
+usb_gen_to_speed_label() {
+  # usage: usb_gen_to_speed_label "Gen 2x2" -> "20 Gb/s"
+  local g="$1" n m base
+  n="$(printf '%s' "$g" | sed -n 's/Gen \([0-9]\+\)x\([0-9]\+\)/\1/p')"
+  m="$(printf '%s' "$g" | sed -n 's/Gen \([0-9]\+\)x\([0-9]\+\)/\2/p')"
+  [[ -z "$n" || -z "$m" ]] && { echo "?"; return; }
+  # Gen1 ~= 5, Gen2 ~= 10（實際還有編碼差異，這裡取常見名義速率即可）
+  if [[ "$n" -eq 1 ]]; then base=5
+  elif [[ "$n" -eq 2 ]]; then base=10
+  elif [[ "$n" -eq 3 ]]; then base=20   # USB4/3.2 Gen3 名義 20
+  else base=$((n*5))
+  fi
+  echo "$((base*m)) Gb/s"
+}
+
+# 匯總：輸入 USB sysfs 節點 → 印一行概要：Current, bcdUSB, SupportedModes
+usb_summarize_node() {
+  local node="$1"
+  local cur_mbps="" cur_human="" ver=""
+  local bus="" dev=""
+  local gens="" gen_speeds="" t s
+  local -a arr=()
+
+  cur_mbps="$(usb_current_speed_mbps "$node")"
+  cur_human="$(usb_fmt_speed "$cur_mbps")"
+  ver="$(usb_bcd_version "$node")"
+
+  if [[ -r "$node/busnum" && -r "$node/devnum" ]]; then
+    bus="$(tr -d $'\r\n' < "$node/busnum")"
+    dev="$(tr -d $'\r\n' < "$node/devnum")"
+    gens="$(usb_supported_gens_from_lsusb "$bus" "$dev")" || gens=""
+  fi
+
+  # 把 gens 轉成速率說明
+  if [[ -n "$gens" ]]; then
+    IFS=',' read -r -a arr <<<"$gens"
+    for t in "${arr[@]}"; do
+      t="$(echo "$t" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+      s="$(usb_gen_to_speed_label "$t")"
+      if [[ -z "$gen_speeds" ]]; then
+        gen_speeds="${t}(${s})"
+      else
+        gen_speeds="${gen_speeds}, ${t}(${s})"
+      fi
+    done
+    printf 'Current=%s  bcdUSB=%s  Supported=%s\n' "$cur_human" "${ver}" "$gen_speeds"
+  else
+    printf 'Current=%s  bcdUSB=%s\n' "$cur_human" "${ver}"
+  fi
+}
+
+# 由 lsusb 的 Bus/Device 反查對應的 USB 裝置 sysfs 節點（整數化比較，避免 001 vs 1 對不上）
+usb_sysnode_from_bus_dev() {
+  local bus_raw="$1" dev_raw="$2"
+  # 轉成十進位整數（去前導 0）
+  local bus dev fb fd p base
+  bus=$((10#$bus_raw))
+  dev=$((10#$dev_raw))
+
+  for p in /sys/bus/usb/devices/*; do
+    [[ -r "$p/busnum" && -r "$p/devnum" ]] || continue
+    fb=$(tr -d $'\r\n' < "$p/busnum" 2>/dev/null || echo "")
+    fd=$(tr -d $'\r\n' < "$p/devnum"  2>/dev/null || echo "")
+    # 也把檔案內容整數化
+    [[ -n "$fb" && -n "$fd" ]] || continue
+    fb=$((10#$fb))
+    fd=$((10#$fd))
+    if (( fb == bus && fd == dev )); then
+      base="$(basename "$p")"
+      printf '/sys/bus/usb/devices/%s\n' "${base%%:*}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# 列出某個 Hub 的所有連接埠；逐埠顯示 Connected/Not Connected
+# usage: usb_list_hub_ports <bus> <dev>
+usb_list_hub_ports() {
+  local bus="$1" dev="$2" node="" base="" prefix="" sep="" ports="" i child child_node
+  node="$(usb_sysnode_from_bus_dev "$bus" "$dev" 2>/dev/null || true)" || node=""
+  [[ -z "$node" ]] && return 1
+
+  # 取得埠數（bNbrPorts）
+  if command -v lsusb >/dev/null 2>&1; then
+    ports="$(lsusb -s "${bus}:${dev}" -v 2>/dev/null | awk '/^[[:space:]]*bNbrPorts[[:space:]]/{print $2; exit}')"
+  fi
+  [[ -z "$ports" ]] && ports=0
+
+  base="$(basename "$node")"
+  if [[ "$base" == usb* ]]; then
+    # root hub：prefix 是 bus 編號（usb1 -> "1"），子節點長 "1-1", "1-2"
+    prefix="${base#usb}"
+    sep="-"
+  else
+    # 外接 hub：prefix 是自身節點名（如 "1-3"），子節點長 "1-3.1", "1-3.2"
+    prefix="$base"
+    sep="."
+  fi
+
+  for (( i=1; i<=ports; i++ )); do
+    child="${prefix}${sep}${i}"
+    child_node="/sys/bus/usb/devices/${child}"
+    if [[ -d "$child_node" ]]; then
+      # 有裝置接在該埠
+      printf "  Port %-2d : Connected  " "$i"
+      usb_summarize_node "$child_node"
+    else
+      printf "  Port %-2d : Not Connected\n" "$i"
+    fi
+  done
+}
+
+# ---------- PCIe link helpers (shared by detect_pcie_ethernet / detect_storage) ----------
+
+# 由 block 名稱 (e.g. nvme0n1) 回推 PCIe BDF（走 /sys）
+pcie_bdf_from_block() {
+  local name="$1" p
+  p="$(readlink -f "/sys/block/${name}/device" 2>/dev/null || true)"
+  while [[ -n "$p" && "$p" != "/" ]]; do
+    case "$(basename "$p")" in
+      ????\:??\:??\.[0-7]) printf '%s\n' "$(basename "$p")"; return 0 ;;
+    esac
+    p="$(dirname "$p")"
+  done
+  return 1
+}
+
+# 從 BDF 讀取 LnkCap/LnkSta 與 ASPM（mawk/BusyBox 友善；set -u 安全）
+pcie_link_info() {
+  # usage: pcie_link_info 0000:3b:00.0
+  local bdf="${1:-}" dump cap_line sta_line ctl_line cap_s="" cap_w="" sta_s="" sta_w="" aspm=""
+  [[ -z "$bdf" ]] && { echo "||||"; return 1; }
+  dump="$(LANG=C lspci -vv -s "$bdf" 2>/dev/null || true)"
+  [[ -z "$dump" ]] && { echo "||||"; return 1; }
+
+  cap_line="$(printf '%s\n' "$dump" | grep -m1 -E '^[[:space:]]*LnkCap:' || true)"
+  sta_line="$(printf '%s\n' "$dump" | grep -m1 -E '^[[:space:]]*LnkSta:' || true)"
+  ctl_line="$(printf '%s\n' "$dump" | grep -m1 -E '^[[:space:]]*LnkCtl:' || true)"
+
+  # 例如：LnkCap: Port #0, Speed 16GT/s, Width x4, ASPM not supported
+  [[ -n "$cap_line" ]] && cap_s="$(printf '%s\n' "$cap_line" | sed -n 's/.*Speed \([^,]*\),.*/\1/p')"
+  [[ -n "$cap_line" ]] && cap_w="$(printf '%s\n' "$cap_line" | sed -n 's/.*Width x\([0-9]\+\).*/\1/p')"
+  # 例如：LnkSta: Speed 8GT/s (ok), Width x4 (ok)
+  [[ -n "$sta_line" ]] && sta_s="$(printf '%s\n' "$sta_line" | sed -n 's/.*Speed \([^,]*\).*/\1/p')"
+  [[ -n "$sta_line" ]] && sta_w="$(printf '%s\n' "$sta_line" | sed -n 's/.*Width x\([0-9]\+\).*/\1/p')"
+  # ASPM：不同平台出現在 LnkCtl 或 LnkCap 註記裡，盡力抓一個可讀狀態
+  if [[ -n "$ctl_line" ]]; then
+    aspm="$(printf '%s\n' "$ctl_line" | sed -n 's/.*ASPM[[:space:]]*\([^,;)]*\).*/\1/p')"
+  fi
+  if [[ -z "$aspm" && -n "$cap_line" ]]; then
+    aspm="$(printf '%s\n' "$cap_line" | sed -n 's/.*ASPM[[:space:]]*\([^,;)]*\).*/\1/p')"
+  fi
+
+  [[ -z "$cap_s"  ]] && cap_s="?"
+  [[ -z "$cap_w"  ]] && cap_w="?"
+  [[ -z "$sta_s"  ]] && sta_s="?"
+  [[ -z "$sta_w"  ]] && sta_w="?"
+  [[ -z "$aspm"   ]] && aspm="?"
+
+  printf '%s|%s|%s|%s|%s\n' "$cap_s" "$cap_w" "$sta_s" "$sta_w" "$aspm"
+}
+
+# ---------- SATA helpers (shared) ----------
+# 從 smartctl 解析「SATA 版本 與 協商速率」；抓不到回 "?|?"
+_sata_proto_speed_from_smartctl() {
+  local dev="$1" line="" proto="" speed=""
+  line="$(smartctl -i "$dev" 2>/dev/null | grep -m1 -i 'SATA Version' || true)"
+  if [[ -n "$line" ]]; then
+    # 例：SATA Version is: SATA 3.3, 6.0 Gb/s (current: 6.0 Gb/s)
+    proto="$(printf '%s\n' "$line" | sed -n 's/.*SATA Version[^:]*:[[:space:]]*\([^,]*\).*/\1/p')"
+    speed="$(printf '%s\n' "$line" | sed -n 's/.*\([0-9]\+\(\.[0-9]\+\)\?[[:space:]]*Gb\/s\).*/\1/p')"
+  fi
+  [[ -z "$proto" ]] && proto="?"
+  [[ -z "$speed" ]] && speed="?"
+  printf '%s|%s\n' "$proto" "$speed"
+}
+
+# 內部：優先無 sudo，失敗再 sudo -n，最後 sudo（都靜默）
+_hdparm_try() {  # $1=-i|-I  $2=/dev/sdX
+  local mode="$1" dev="$2"
+  hdparm "$mode" "$dev" 2>/dev/null \
+  || sudo -n hdparm "$mode" "$dev" 2>/dev/null \
+  || sudo hdparm "$mode" "$dev" 2>/dev/null
+}
+
+# 從 hdparm / smartctl 解析「已啟用的 UDMA 模式」
+_sata_udma_mode() {
+  local dev="$1" udma="" line=""
+
+  if command -v hdparm >/dev/null 2>&1; then
+    # A1) 先試 -I 的「DMA: ... *udmaN」同一行（你的機器是這種）
+    udma="$(_hdparm_try -I "$dev" \
+           | tr -d '\r' \
+           | sed -n 's/.*DMA:.*\*\(udma[0-9]\+\).*/\1/p')" || true
+
+    # A2) 抓不到再掃 -I 的「UDMA modes:」區塊（有些機器長這樣）
+    if [[ -z "$udma" ]]; then
+      udma="$(_hdparm_try -I "$dev" \
+             | tr -d '\r' \
+             | sed -n '/UDMA[[:space:]]*modes:/,/^[[:space:]]*$/p' \
+             | tr '\n' ' ' \
+             | sed -n 's/.*UDMA[[:space:]]*modes:[^*]*\*\(udma[0-9]\+\).*/\1/p')" || true
+    fi
+
+    # B) 再抓不到，改用 -i（舊式「UDMA modes: ... *udmaN」）
+    if [[ -z "$udma" ]]; then
+      udma="$(_hdparm_try -i "$dev" \
+             | tr -d '\r' \
+             | sed -n 's/.*UDMA[[:space:]]*modes:[[:space:]]*.*\*\(udma[0-9]\+\).*/\1/p')" || true
+    fi
+  fi
+
+  # C) 最後以 smartctl 備援（"UDMA Mode: udma6"）
+  if [[ -z "$udma" ]] && command -v smartctl >/dev/null 2>&1; then
+    line="$(smartctl -i "$dev" 2>/dev/null | tr -d '\r' | grep -m1 -i 'UDMA Mode' || true)"
+    [[ -n "$line" ]] && udma="$(printf '%s\n' "$line" | sed -n 's/.*UDMA[[:space:]]*Mode:[[:space:]]*\([^ ]*\).*/\1/p')" || true
+  fi
+
+  [[ -z "$udma" ]] && udma="?"
+  printf '%s\n' "$udma"
+}
+
+# 一次匯總：輸入 /dev/sdX → 回傳 "proto|link|udma"
+sata_summarize_dev() {
+  local dev="$1"
+  local proto="?" link="?" udma="?" line p l gen dump
+
+  # 1) smartctl：抓 "SATA Version ..., 6.0 Gb/s (current: ...)"
+  if command -v smartctl >/dev/null 2>&1; then
+    line="$(smartctl -i "$dev" 2>/dev/null | grep -m1 -i 'SATA Version' || true)"
+    if [[ -n "$line" ]]; then
+      p="$(printf '%s\n' "$line" | sed -n 's/.*SATA Version[^:]*:[[:space:]]*\([^,]*\).*/\1/p')"
+      l="$(printf '%s\n' "$line" | sed -n 's/.*\([0-9]\+\(\.[0-9]\+\)\?[[:space:]]*Gb\/s\).*/\1/p')"
+      [[ -n "$p" ]] && proto="$p"
+      [[ -n "$l" ]] && link="$l"
+      if [[ "$link" == "?" ]]; then
+        # 再退一步抓冒號後第一個 Gb/s
+        [[ -n "$l" ]] && l="$(printf '%s\n' "$l" | sed -E 's/([0-9])\s*(Gb\/s|Mb\/s)/\1 \2/')"
+        [[ -n "$l" ]] && link="$l"
+      fi
+    fi
+  fi
+
+  # 2) 若還是異常（空或 "0 Gb/s"），用 hdparm -I 的 "GenX signaling speed (...Gb/s)" 補
+  if [[ -z "$link" || "$link" == "?" || "$link" == "0 Gb/s" ]]; then
+    if command -v hdparm >/dev/null 2>&1; then
+      # 例： "Gen1 signaling speed (1.5Gb/s)"、"Gen2 ... (3.0Gb/s)"、"Gen3 ... (6.0Gb/s)"
+      local hl gennum rate
+      hl="$(_hdparm_try -I "$dev" | tr -d '\r' | sed -n 's/.*Gen\([0-9]\+\)[^()]*(\([0-9]\+\(\.[0-9]\+\)\?Gb\/s\)).*/\1|\2/p' | head -n1)"
+      if [[ -n "$hl" ]]; then
+        gennum="${hl%%|*}"
+        rate="${hl##*|}"
+        # 正規化速率：1.5Gb/s → 1.5 Gb/s
+        rate="$(printf '%s\n' "$rate" | sed -E 's/([0-9])\s*(Gb\/s|Mb\/s)/\1 \2/')"
+        link="$rate"
+        # 依 Gen 直接決定 proto
+        case "$gennum" in
+          1) proto="SATA 1.x" ;;
+          2) proto="SATA 2.x" ;;
+          3) proto="SATA 3.x" ;;
+          4) proto="SATA 4.x" ;;
+        esac
+      else
+        # 抓不到 Gen，僅有速率時用 hdparm 另一個式子抓速率
+        l="$(_hdparm_try -I "$dev" \
+            | tr -d '\r' \
+            | sed -n 's/.*Gen[1234][^()]*(\([0-9]\+\(\.[0-9]\+\)\?Gb\/s\)).*/\1/p' \
+            | head -n1)"
+        if [[ -n "$l" ]]; then
+          l="$(printf '%s\n' "$l" | sed -E 's/([0-9])\s*(Gb\/s|Mb\/s)/\1 \2/')"
+          link="$l"
+          # 由速率反推 proto
+          case "$l" in
+            1.5\ Gb/s) proto="SATA 1.x" ;;
+            3.0\ Gb/s) proto="SATA 2.x" ;;
+            6.0\ Gb/s) proto="SATA 3.x" ;;
+            12.0\ Gb/s) proto="SATA 4.x" ;;
+          esac
+        fi
+      fi
+    fi
+  fi
+
+  # 3) 再不行，用 udev Gen → 速率對照
+  if [[ -z "$link" || "$link" == "?" || "$link" == "0 Gb/s" ]]; then
+    if command -v udevadm >/dev/null 2>&1; then
+      dump="$(udevadm info -q property -n "$dev" 2>/dev/null || true)"
+      if printf '%s\n' "$dump" | grep -q '^ID_ATA_SATA=1$'; then
+        if   printf '%s\n' "$dump" | grep -q '^ID_ATA_SATA_SIGNAL_RATE_GEN3=1$'; then gen=3
+        elif printf '%s\n' "$dump" | grep -q '^ID_ATA_SATA_SIGNAL_RATE_GEN2=1$'; then gen=2
+        elif printf '%s\n' "$dump" | grep -q '^ID_ATA_SATA_SIGNAL_RATE_GEN1=1$'; then gen=1
+        fi
+        [[ -n "$gen" ]] && {
+          [[ "$proto" == "?" ]] && proto="SATA 3.x"
+          case "$gen" in
+            1) link="1.5 Gb/s" ;;
+            2) link="3.0 Gb/s" ;;
+            3) link="6.0 Gb/s" ;;
+            4) link="12.0 Gb/s" ;;
+          esac
+        }
+      fi
+    fi
+  fi
+
+  # 4) UDMA 一律用穩定的解析器（你已驗證 OK）
+  udma="$(_sata_udma_mode "$dev")"
+
+  printf '%s|%s|%s\n' "${proto:-?}" "${link:-?}" "${udma:-?}"
+}
+
+_sata_rate_for_gen() {
+  # $1 = 1|2|3|…  回 1.5 Gb/s | 3.0 Gb/s | 6.0 Gb/s（未知回 ?）
+  case "$1" in
+    1) echo "1.5 Gb/s" ;;
+    2) echo "3.0 Gb/s" ;;
+    3) echo "6.0 Gb/s" ;;
+    4) echo "12.0 Gb/s" ;;  # SATA 4.0（少見，預留）
+    *) echo "?" ;;
+  esac
 }

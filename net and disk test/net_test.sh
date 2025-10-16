@@ -210,6 +210,8 @@ for (( loop_n=1; loop_n<=_loops_this_run; loop_n++ )); do
       v6_res=$(_ping_check "ns_${ev}" "fd00:2470::${i}:11" "1")
 
       # Start iperf3 server on odd side
+      ensure_tools iperf3 ethtool
+
       echo "${_pwd}" | sudo -S ip netns exec ns_${od} iperf3 --bind 192.247.${i}.11 --server --daemon
       sleep 1
 
