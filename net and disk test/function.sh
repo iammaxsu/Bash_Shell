@@ -390,44 +390,59 @@ counter_init() {
   local _name="${1:-net}"   # 1st parameter: counter name (default: "net")
   local _target="${2:-1}"   # 2nd parameter: target count (default: 1)
 
-  # Use the same session_state dir as session.id
-  local _base="${_session_log_dir:-${_log_dir:-${_tool_path:-$PWD}/logs}}"
+  # Put counter under global logs (not bound to session subdir)
+  local _base="${_log_dir:-${_tool_path:-$PWD}/logs}"
   : "${_session_state_dir:=${_base}/session_state}"
   mkdir -p -- "${_session_state_dir}"
 
   _counter_name="${_name}"
   _counter_file="${_session_state_dir}/counter.${_counter_name}"
 
-  # If have a counter and not done, reuse it.
+  # 讀現有 counter；同時支援舊鍵名 sid/m/n（自動轉成 _sid/_m/_n）
+  local __sid="" __m="" __n=""     # 暫存（本地）
+  local sid="" m="" n=""           # 舊版鍵名（相容用）    # shellcheck disable=SC1090,SC1091
   if [[ -s "${_counter_file}" ]]; then
-    # load existing
-    # shellcheck disable=SC1090,SC1091
-    source "${_counter_file}"     # Import sid, m, & n.
-    if [[ -n "${_sid:-}" && -n "${_m:-}" && -n "${_n:-}" && "${_n}" -lt "${_m}" ]]; then
-      #export _session_policy="sticky"
-      export _session_id="${_sid}"
-    fi
+     # shellcheck disable=SC1090,SC1091
+    source "${_counter_file}" || true
+    [[ -n "${_sid:-}" ]] && __sid="${_sid}"
+    [[ -n "${_m:-}"   ]] && __m="${_m}"
+    [[ -n "${_n:-}"   ]] && __n="${_n}"
+    [[ -z "${_sid}" && -n "${sid}" ]] && _sid="${sid}"
+    [[ -z "${_m}"   && -n "${m}"   ]] && _m="${m}"
+    [[ -z "${_n}"   && -n "${n}"   ]] && _n="${n}"
   fi
 
-  # Build or rebuild session ID if needed
+  # If an unfinished counter exists, reuse its session id to avoid creating a new one
+  if [[ -n "${__sid}" && -n "${__m}" && -n "${__n}" && "${__n}" -lt "${__m}" ]]; then
+    export _session_id="${__sid}"
+  fi
+
+  # Build or reuse session ID (ensure_session_id respects preset _session_id)
   ensure_session_id
 
-  if [[ ! -s "${_counter_file}" || "${_n:-999999}" -ge "${_m:-0}" || "${_sid:-}" != "${_session_id:-}" ]]; then
-    # start new counter
-    _sid="${_session_id}"
-    _m="${_target}"
-    _n=0
-    printf 'sid=%q\nm=%q\nn=%q\n' "${_sid}" "${_m}" "${_n}" > "${_counter_file}"
+  # Reset conditions: no file / missing values / finished / mismatched session
+  if [[ ! -s "${_counter_file}" || -z "${__sid}" || -z "${__m}" || -z "${__n}" || "${__n}" -ge "${__m}" || "${__sid}" != "${_session_id}" ]]; then
+    __sid="${_session_id}"
+    __m="${_target}"
+    __n=0  
   fi
+
+  # Persist (new keys with underscores) & export
+  printf '_sid=%q\n_m=%q\n_n=%q\n' "${__sid}" "${__m}" "${__n}" > "${_counter_file}"
+  _sid="${__sid}"; _m="${__m}"; _n="${__n}"
+
+  # Debug
+  echo "[DBG] counter_init: file=${_counter_file} _sid=${_sid} _n=${_n} _m=${_m}" >&2
 }
 
 # Return k/m (k = n+1)
 counter_next_tag() {
-  local _k=$(( ${_n} + 1 ))
-  if (( _k > _m )); then
-    _k="${_m}"
+  local __n="${_n:-0}" __m="${_m:-1}"
+  local _k=$(( __n + 1 ))
+  if (( _k > __m )); then
+    _k="${__m}"
   fi
-  printf '%d/%d' "${_k}" "${_m}"
+  printf '%d/%d' "${_k}" "${__m}"
 }
 
 counter_loops_this_run() {
@@ -444,13 +459,24 @@ counter_loops_this_run() {
 
 # Call after each successful loop. n+1 if n >= m, end and cleaar the session.
 counter_tick() {
-  _n=$(( _n + 1 ))
-  printf 'sid=%q\nm=%q\nn=%q\n' "${_session_id}" "${_m}" "${_n}" > "${_counter_file}"
-  if [[ "${_n}" -ge "${_m}" ]]; then
-    # Done: clear the counter & session ID. 
+  _n=$(( ${_n:-0} + 1 ))
+  local __m="${_m:-1}"
+  printf '_sid=%q\n_m=%q\n_n=%q\n' "${_session_id}" "${__m}" "${_n}" > "${_counter_file}"
+  echo "[DBG] counter_tick:  file=${_counter_file} _sid=${_session_id} _n=${_n} _m=${__m}" >&2
+  if [[ "${_n}" -ge "${__m}" ]]; then    # Done: clear the counter & session ID.
     rm -f -- "${_counter_file}" 2>/dev/null || true
     rm -rf -- "${_session_state_dir}/session.id" 2>/dev/null || true
     unset _session_id
+  fi
+}
+
+# 回傳剩餘回合數（_m - _n），至少為 0
+counter_remaining() {
+  local __m="${_m:-0}" __n="${_n:-0}"
+  if (( __m <= __n )); then
+    echo 0
+  else
+    echo $(( __m - __n ))
   fi
 }
 

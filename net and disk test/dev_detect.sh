@@ -541,6 +541,14 @@ compare_with_golden() {
   fi
 }
 # =============================================================================
+# ---- Loops (持久化) ----
+parse_common_cli "$@"
+counter_init "dev" "${_target_loop:-1}"
+_loops_this_run="$(counter_loops_this_run)"
+if [[ "${_loops_this_run}" -le 0 ]]; then
+  echo "[INFO] Already completed (${_n}/${_m}). Nothing to do."
+  exit 0
+fi
 
 # ---- Init paths ----
 log_dir "" 1
@@ -555,14 +563,21 @@ golden_dir="${log_root}/golden"
 golden_tpl="${golden_dir}/${_dev_detect_test_name}.golden.txt"
 mkdir -p -- "${golden_dir}"
 
-# ---- Loops (持久化) ----
-parse_common_cli "$@"
-counter_init "dev" "${_target_loop:-1}"
-_loops_this_run="$(counter_loops_this_run)"
-if [[ "${_loops_this_run}" -le 0 ]]; then
-  echo "[INFO] Already completed (${_n}/${_m}). Nothing to do."
+# ---- 本次只跑 1 回合（但不超過剩餘回合）----
+_remaining="$(counter_remaining)"
+_loops_this_run=$(( _remaining > 0 ? 1 : 0 ))
+if (( _loops_this_run == 0 )); then
+  echo "[INFO] Nothing to do: already completed ${_m}/${_m}."
   exit 0
 fi
+# ---- Loops (持久化) ----
+#parse_common_cli "$@"
+#counter_init "dev" "${_target_loop:-1}"
+#_loops_this_run="$(counter_loops_this_run)"
+#if [[ "${_loops_this_run}" -le 0 ]]; then
+#  echo "[INFO] Already completed (${_n}/${_m}). Nothing to do."
+#  exit 0
+#fi
 
 # ---- Header & start timer ----
 _devlog="${log_root}/${_dev_detect_test_name}_${_run_ts}.log"
@@ -577,7 +592,9 @@ run_time
 
 # ---- Main loop ----
 for (( dev_loop=1; dev_loop<=_loops_this_run; dev_loop++ )); do
+  #tag="$(counter_next_tag)"; k="${tag%%/*}"; m="${tag##*/}"
   tag="$(counter_next_tag)"; k="${tag%%/*}"; m="${tag##*/}"
+  echo "[DBG] next_tag=${tag} (k=${k} m=${m})  session=${_session_id}"
   echo "[$tag] Device detect..." | tee -a "${_devlog}"
 
   now_snapshot="${log_root}/${_dev_detect_test_name}_snapshot_${k}_of_${m}_${_run_ts}.txt"
@@ -614,3 +631,6 @@ done
 
 echo "" | tee -a "${_devlog}"
 elp_time | tee -a "${_devlog}"
+
+
+sleep 60 && reboot
